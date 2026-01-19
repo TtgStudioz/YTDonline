@@ -2,22 +2,110 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>YouTube → MP3</title>
-  <link rel="stylesheet" href="style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube to MP3 Downloader</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      background: #f0f0f0;
+    }
+    .container {
+      background: #fff;
+      padding: 30px;
+      border-radius: 10px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.2);
+      text-align: center;
+      width: 90%;
+      max-width: 400px;
+    }
+    input {
+      width: 100%;
+      padding: 10px;
+      font-size: 16px;
+      margin: 10px 0;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      background-color: #1db954;
+      color: #fff;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 14px;
+      color: #333;
+    }
+  </style>
 </head>
 <body>
+  <div class="container">
+    <h2>YouTube to MP3 Downloader</h2>
+    <input type="text" id="youtubeUrl" placeholder="Paste YouTube video URL here">
+    <button id="downloadBtn">Download</button>
+    <div id="status"></div>
+  </div>
 
-<div class="card">
-  <h1>YouTube Audio Downloader</h1>
+  <script>
+    const downloadBtn = document.getElementById("downloadBtn");
+    const youtubeInput = document.getElementById("youtubeUrl");
+    const statusDiv = document.getElementById("status");
 
-  <input id="yt" placeholder="YouTube URL">
-  <input id="search" placeholder="Spotify search (title artist)">
+    downloadBtn.addEventListener("click", async () => {
+      const url = youtubeInput.value.trim();
+      if (!url) return alert("Please enter a YouTube URL!");
 
-  <button onclick="download()">Download MP3</button>
+      statusDiv.textContent = "Processing... Please wait.";
+      downloadBtn.disabled = true;
 
-  <p id="status"></p>
-</div>
+      try {
+        const res = await fetch("/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ youtubeUrl: url })
+        });
 
-<script src="script.js"></script>
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || "Unknown error");
+        }
+
+        // Download the file
+        const blob = await res.blob();
+        const disposition = res.headers.get("Content-Disposition");
+        let filename = "song.mp3";
+        if (disposition && disposition.includes("filename=")) {
+          filename = disposition.split("filename=")[1].replace(/"/g, "");
+        }
+
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        statusDiv.textContent = "Download complete!";
+      } catch (err) {
+        console.error(err);
+        statusDiv.textContent = "Error: " + err.message;
+      } finally {
+        downloadBtn.disabled = false;
+      }
+    });
+  </script>
 </body>
 </html>

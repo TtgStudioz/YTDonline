@@ -28,7 +28,6 @@ const ytDlpPath = path.join(tmpDir, "yt-dlp");
 const ffmpegPath = path.join(tmpDir, "ffmpeg");
 
 // ---------------- COOKIES ----------------
-// Path to store cookies locally
 const cookiesPath = path.join(tmpDir, "cookies.txt");
 
 async function fetchCookies() {
@@ -48,9 +47,7 @@ async function fetchCookies() {
   }
 }
 
-// Fetch cookies on startup
 fetchCookies();
-// Refresh every 12 hours
 setInterval(fetchCookies, 12 * 60 * 60 * 1000);
 
 // ---------------- SETUP BINARIES ----------------
@@ -87,14 +84,44 @@ async function setupBinaries() {
 
 setupBinaries().then(() => console.log("Binaries ready"));
 
+// ---------------- FETCH YOUTUBE METADATA ----------------
+async function fetchYoutubeMetadata(youtubeUrl) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "--no-warnings",
+      "--no-playlist",
+      "--dump-json",
+      youtubeUrl
+    ];
+
+    if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
+
+    execFile(ytDlpPath, args, (err, stdout, stderr) => {
+      if (err) return reject(stderr || err);
+      try {
+        const info = JSON.parse(stdout);
+        // title + channel name
+        const query = `${info.title} ${info.uploader}`;
+        resolve(query);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
 // ---------------- DOWNLOAD ROUTE ----------------
 app.post("/download", async (req, res) => {
-  const { youtubeUrl, searchQuery } = req.body;
-  if (!youtubeUrl || !searchQuery) return res.status(400).json({ error: "Missing data" });
+  const { youtubeUrl } = req.body;
+  if (!youtubeUrl) return res.status(400).json({ error: "Missing YouTube URL" });
 
   try {
     await getSpotifyToken();
 
+    // 1️⃣ Fetch YouTube metadata
+    const searchQuery = await fetchYoutubeMetadata(youtubeUrl);
+
+    // 2️⃣ Search Spotify using title + uploader
     const search = await spotify.searchTracks(searchQuery, { limit: 1 });
     const track = search.body.tracks.items[0];
     if (!track) throw new Error("Track not found on Spotify");
@@ -112,13 +139,13 @@ app.post("/download", async (req, res) => {
     const coverPath = path.join(downloadsDir, "cover.jpg");
     const finalOutput = path.join(downloadsDir, `${safeTitle}.mp3`);
 
-    // Download cover
+    // 3️⃣ Download cover
     console.log("Downloading cover image...");
     const response = await fetch(coverUrl);
     const buffer = await response.buffer();
     fs.writeFileSync(coverPath, buffer);
 
-    // Download YouTube audio
+    // 4️⃣ Download YouTube audio
     console.log("Downloading YouTube audio...");
     await new Promise((resolve, reject) => {
       const args = [
@@ -137,7 +164,7 @@ app.post("/download", async (req, res) => {
       });
     });
 
-    // Embed metadata
+    // 5️⃣ Embed metadata
     console.log("Embedding metadata...");
     await new Promise((resolve, reject) => {
       execFile(ffmpegPath, [
