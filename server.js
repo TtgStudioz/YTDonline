@@ -2,10 +2,10 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { execFile, execSync } = require("child_process");
 const SpotifyWebApi = require("spotify-web-api-node");
 const fetch = require("node-fetch"); // npm install node-fetch@2
-const os = require("os");
 
 const app = express();
 app.use(express.json());
@@ -21,12 +21,16 @@ async function getSpotifyToken() {
   spotify.setAccessToken(data.body.access_token);
 }
 
-// Render/Linux-friendly temp folder
 const tmpDir = os.tmpdir();
 const ytDlpPath = path.join(tmpDir, "yt-dlp");
 const ffmpegPath = path.join(tmpDir, "ffmpeg");
 
-// Download binaries if not present
+// --- You need to create this file locally ---
+// Export your YouTube cookies from Chrome/Edge and save as cookies.txt
+// Place it in the project root. Do NOT commit to GitHub.
+const cookiesPath = path.join(__dirname, "cookies.txt");
+
+// Download yt-dlp and ffmpeg if not exist
 async function setupBinaries() {
   // yt-dlp
   if (!fs.existsSync(ytDlpPath)) {
@@ -37,32 +41,33 @@ async function setupBinaries() {
     fs.chmodSync(ytDlpPath, 0o755);
   }
 
-  // FFmpeg static build (Linux)
-    if (!fs.existsSync(ffmpegPath)) {
-        console.log("Downloading FFmpeg...");
-        const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
-        const res = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
-        const buffer = await res.buffer();
-        fs.writeFileSync(ffmpegTar, buffer);
+  // FFmpeg static Linux
+  if (!fs.existsSync(ffmpegPath)) {
+    console.log("Downloading FFmpeg...");
+    const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
+    const res = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
+    const buffer = await res.buffer();
+    fs.writeFileSync(ffmpegTar, buffer);
 
-        // Extract the ffmpeg binary
-        execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
-        
-        // The binary is inside a folder named like ffmpeg-*-amd64-static
-        const files = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
-        if (files.length === 0) throw new Error("FFmpeg folder not found after extraction");
-        const ffmpegFolder = path.join(tmpDir, files[0]);
-        fs.renameSync(path.join(ffmpegFolder, "ffmpeg"), ffmpegPath); // move ffmpeg binary to tmp
-        fs.chmodSync(ffmpegPath, 0o755);
+    // Extract
+    execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
 
-        // Clean up
-        fs.rmSync(ffmpegFolder, { recursive: true, force: true });
-        fs.unlinkSync(ffmpegTar);
-    }
+    // Find folder like ffmpeg-*-amd64-static
+    const folders = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
+    if (folders.length === 0) throw new Error("FFmpeg folder not found after extraction");
+    const ffmpegFolder = path.join(tmpDir, folders[0]);
 
+    // Move ffmpeg binary
+    fs.renameSync(path.join(ffmpegFolder, "ffmpeg"), ffmpegPath);
+    fs.chmodSync(ffmpegPath, 0o755);
+
+    // Clean up
+    fs.rmSync(ffmpegFolder, { recursive: true, force: true });
+    fs.unlinkSync(ffmpegTar);
+  }
 }
 
-// Ensure binaries exist before handling requests
+// Ensure binaries are ready
 setupBinaries().then(() => console.log("Binaries ready"));
 
 app.post("/download", async (req, res) => {
@@ -71,6 +76,7 @@ app.post("/download", async (req, res) => {
 
   try {
     await getSpotifyToken();
+
     const search = await spotify.searchTracks(searchQuery, { limit: 1 });
     const track = search.body.tracks.items[0];
     if (!track) throw new Error("Track not found on Spotify");
@@ -95,12 +101,17 @@ app.post("/download", async (req, res) => {
 
     console.log("Downloading YouTube audio...");
     await new Promise((resolve, reject) => {
-      execFile(ytDlpPath, [
+      const args = [
         "-x", "--audio-format", "mp3",
         "--ffmpeg-location", ffmpegPath,
         "-o", tempAudio,
         youtubeUrl
-      ], (err, stdout, stderr) => {
+      ];
+
+      // Add cookies if file exists
+      if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
+
+      execFile(ytDlpPath, args, (err, stdout, stderr) => {
         if (err) return reject(stderr || err);
         resolve();
       });
