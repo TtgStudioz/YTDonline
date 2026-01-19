@@ -104,6 +104,7 @@ app.post("/download", async (req, res) => {
       const args = [
         "-x", "--audio-format", "mp3",
         "--ffmpeg-location", ffmpegPath,
+        "--js-runtime", "node",      // ← ADD THIS
         "-o", tempAudio,
         youtubeUrl
       ];
