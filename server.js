@@ -38,18 +38,28 @@ async function setupBinaries() {
   }
 
   // FFmpeg static build (Linux)
-  if (!fs.existsSync(ffmpegPath)) {
-    console.log("Downloading FFmpeg...");
-    const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
-    const res = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
-    const buffer = await res.buffer();
-    fs.writeFileSync(ffmpegTar, buffer);
+    if (!fs.existsSync(ffmpegPath)) {
+        console.log("Downloading FFmpeg...");
+        const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
+        const res = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
+        const buffer = await res.buffer();
+        fs.writeFileSync(ffmpegTar, buffer);
 
-    // Extract ffmpeg binary
-    execSync(`tar -xJf ${ffmpegTar} --strip-components=1 -C ${tmpDir} */ffmpeg`);
-    fs.chmodSync(ffmpegPath, 0o755);
-    fs.unlinkSync(ffmpegTar);
-  }
+        // Extract the ffmpeg binary
+        execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
+        
+        // The binary is inside a folder named like ffmpeg-*-amd64-static
+        const files = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
+        if (files.length === 0) throw new Error("FFmpeg folder not found after extraction");
+        const ffmpegFolder = path.join(tmpDir, files[0]);
+        fs.renameSync(path.join(ffmpegFolder, "ffmpeg"), ffmpegPath); // move ffmpeg binary to tmp
+        fs.chmodSync(ffmpegPath, 0o755);
+
+        // Clean up
+        fs.rmSync(ffmpegFolder, { recursive: true, force: true });
+        fs.unlinkSync(ffmpegTar);
+    }
+
 }
 
 // Ensure binaries exist before handling requests
