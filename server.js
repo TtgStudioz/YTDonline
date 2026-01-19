@@ -11,6 +11,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
+// ---------------- SPOTIFY ----------------
 const spotify = new SpotifyWebApi({
   clientId: process.env.SPOTIFY_CLIENT_ID,
   clientSecret: process.env.SPOTIFY_CLIENT_SECRET
@@ -21,24 +22,40 @@ async function getSpotifyToken() {
   spotify.setAccessToken(data.body.access_token);
 }
 
+// ---------------- TEMP DIR ----------------
 const tmpDir = os.tmpdir();
 const ytDlpPath = path.join(tmpDir, "yt-dlp");
 const ffmpegPath = path.join(tmpDir, "ffmpeg");
+
+// ---------------- COOKIES ----------------
+// Path to store cookies locally
 const cookiesPath = path.join(tmpDir, "cookies.txt");
 
-// --- Fetch cookies automatically ---
 async function fetchCookies() {
-  if (!process.env.COOKIES_URL) return;
-  console.log("Fetching cookies...");
-  const res = await fetch(process.env.COOKIES_URL);
-  if (!res.ok) throw new Error("Failed to fetch cookies from storage");
-  const txt = await res.text();
-  fs.writeFileSync(cookiesPath, txt);
-  console.log("Cookies saved to", cookiesPath);
+  if (!process.env.COOKIES_URL) throw new Error("COOKIES_URL not set");
+  if (!process.env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN not set");
+
+  try {
+    const res = await fetch(process.env.COOKIES_URL, {
+      headers: { 'Authorization': `token ${process.env.GITHUB_TOKEN}` }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const txt = await res.text();
+    fs.writeFileSync(cookiesPath, txt);
+    console.log("Cookies updated");
+  } catch (e) {
+    console.error("Failed to fetch cookies:", e);
+  }
 }
 
-// --- Setup yt-dlp and FFmpeg ---
+// Fetch cookies on startup
+fetchCookies();
+// Refresh every 12 hours
+setInterval(fetchCookies, 12 * 60 * 60 * 1000);
+
+// ---------------- SETUP BINARIES ----------------
 async function setupBinaries() {
+  // yt-dlp
   if (!fs.existsSync(ytDlpPath)) {
     console.log("Downloading yt-dlp...");
     const res = await fetch("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp");
@@ -47,6 +64,7 @@ async function setupBinaries() {
     fs.chmodSync(ytDlpPath, 0o755);
   }
 
+  // FFmpeg static Linux
   if (!fs.existsSync(ffmpegPath)) {
     console.log("Downloading FFmpeg...");
     const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
@@ -55,7 +73,6 @@ async function setupBinaries() {
     fs.writeFileSync(ffmpegTar, buffer);
 
     execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
-
     const folders = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
     if (folders.length === 0) throw new Error("FFmpeg folder not found after extraction");
     const ffmpegFolder = path.join(tmpDir, folders[0]);
@@ -68,25 +85,9 @@ async function setupBinaries() {
   }
 }
 
-// --- Auto-refresh cookies every 12 hours ---
-async function refreshCookiesPeriodically() {
-  try {
-    await fetchCookies();
-  } catch (e) {
-    console.error("Failed to fetch cookies:", e);
-  }
-  setTimeout(refreshCookiesPeriodically, 12 * 60 * 60 * 1000); // 12 hours
-}
+setupBinaries().then(() => console.log("Binaries ready"));
 
-// --- Initialize server ---
-async function init() {
-  await setupBinaries();
-  console.log("Binaries ready");
-  refreshCookiesPeriodically(); // start auto-refresh
-}
-
-init().catch(console.error);
-
+// ---------------- DOWNLOAD ROUTE ----------------
 app.post("/download", async (req, res) => {
   const { youtubeUrl, searchQuery } = req.body;
   if (!youtubeUrl || !searchQuery) return res.status(400).json({ error: "Missing data" });
@@ -111,11 +112,13 @@ app.post("/download", async (req, res) => {
     const coverPath = path.join(downloadsDir, "cover.jpg");
     const finalOutput = path.join(downloadsDir, `${safeTitle}.mp3`);
 
+    // Download cover
     console.log("Downloading cover image...");
     const response = await fetch(coverUrl);
     const buffer = await response.buffer();
     fs.writeFileSync(coverPath, buffer);
 
+    // Download YouTube audio
     console.log("Downloading YouTube audio...");
     await new Promise((resolve, reject) => {
       const args = [
@@ -134,6 +137,7 @@ app.post("/download", async (req, res) => {
       });
     });
 
+    // Embed metadata
     console.log("Embedding metadata...");
     await new Promise((resolve, reject) => {
       execFile(ffmpegPath, [
@@ -154,7 +158,7 @@ app.post("/download", async (req, res) => {
       });
     });
 
-    console.log("Cleaning up...");
+    // Cleanup
     fs.unlinkSync(tempAudio);
     fs.unlinkSync(coverPath);
 
@@ -167,6 +171,7 @@ app.post("/download", async (req, res) => {
   }
 });
 
+// ---------------- START SERVER ----------------
 app.listen(process.env.PORT || 3000, () => {
   console.log("Server running...");
 });
