@@ -24,15 +24,21 @@ async function getSpotifyToken() {
 const tmpDir = os.tmpdir();
 const ytDlpPath = path.join(tmpDir, "yt-dlp");
 const ffmpegPath = path.join(tmpDir, "ffmpeg");
+const cookiesPath = path.join(tmpDir, "cookies.txt");
 
-// --- You need to create this file locally ---
-// Export your YouTube cookies from Chrome/Edge and save as cookies.txt
-// Place it in the project root. Do NOT commit to GitHub.
-const cookiesPath = path.join(__dirname, "cookies.txt");
+// --- Fetch cookies automatically ---
+async function fetchCookies() {
+  if (!process.env.COOKIES_URL) return;
+  console.log("Fetching cookies...");
+  const res = await fetch(process.env.COOKIES_URL);
+  if (!res.ok) throw new Error("Failed to fetch cookies from storage");
+  const txt = await res.text();
+  fs.writeFileSync(cookiesPath, txt);
+  console.log("Cookies saved to", cookiesPath);
+}
 
-// Download yt-dlp and ffmpeg if not exist
+// --- Setup yt-dlp and FFmpeg ---
 async function setupBinaries() {
-  // yt-dlp
   if (!fs.existsSync(ytDlpPath)) {
     console.log("Downloading yt-dlp...");
     const res = await fetch("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp");
@@ -41,7 +47,6 @@ async function setupBinaries() {
     fs.chmodSync(ytDlpPath, 0o755);
   }
 
-  // FFmpeg static Linux
   if (!fs.existsSync(ffmpegPath)) {
     console.log("Downloading FFmpeg...");
     const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
@@ -49,26 +54,38 @@ async function setupBinaries() {
     const buffer = await res.buffer();
     fs.writeFileSync(ffmpegTar, buffer);
 
-    // Extract
     execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
 
-    // Find folder like ffmpeg-*-amd64-static
     const folders = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
     if (folders.length === 0) throw new Error("FFmpeg folder not found after extraction");
     const ffmpegFolder = path.join(tmpDir, folders[0]);
 
-    // Move ffmpeg binary
     fs.renameSync(path.join(ffmpegFolder, "ffmpeg"), ffmpegPath);
     fs.chmodSync(ffmpegPath, 0o755);
 
-    // Clean up
     fs.rmSync(ffmpegFolder, { recursive: true, force: true });
     fs.unlinkSync(ffmpegTar);
   }
 }
 
-// Ensure binaries are ready
-setupBinaries().then(() => console.log("Binaries ready"));
+// --- Auto-refresh cookies every 12 hours ---
+async function refreshCookiesPeriodically() {
+  try {
+    await fetchCookies();
+  } catch (e) {
+    console.error("Failed to fetch cookies:", e);
+  }
+  setTimeout(refreshCookiesPeriodically, 12 * 60 * 60 * 1000); // 12 hours
+}
+
+// --- Initialize server ---
+async function init() {
+  await setupBinaries();
+  console.log("Binaries ready");
+  refreshCookiesPeriodically(); // start auto-refresh
+}
+
+init().catch(console.error);
 
 app.post("/download", async (req, res) => {
   const { youtubeUrl, searchQuery } = req.body;
@@ -104,12 +121,11 @@ app.post("/download", async (req, res) => {
       const args = [
         "-x", "--audio-format", "mp3",
         "--ffmpeg-location", ffmpegPath,
-        "--js-runtime", "node",      // ← ADD THIS
+        "--js-runtime", "node",
         "-o", tempAudio,
         youtubeUrl
       ];
 
-      // Add cookies if file exists
       if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
 
       execFile(ytDlpPath, args, (err, stdout, stderr) => {
