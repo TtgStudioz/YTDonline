@@ -58,54 +58,75 @@
     <button id="downloadBtn">Download</button>
     <div id="status"></div>
   </div>
+  <div id="preview" style="display:none">
+  <img id="cover" width="200"><br>
+  <strong id="title"></strong><br>
+  <span id="artist"></span><br><br>
+  <button id="confirm">Confirm Download</button>
+</div>
 
-  <script>
-    const downloadBtn = document.getElementById("downloadBtn");
-    const youtubeInput = document.getElementById("youtubeUrl");
-    const statusDiv = document.getElementById("status");
+<div id="progressBox" style="display:none">
+  <progress id="progressBar" value="0" max="100"></progress>
+  <div id="progressText"></div>
+</div>
 
-    downloadBtn.addEventListener("click", async () => {
-      const url = youtubeInput.value.trim();
-      if (!url) return alert("Please enter a YouTube URL!");
 
-      statusDiv.textContent = "Processing... Please wait.";
-      downloadBtn.disabled = true;
+ <script>
+const previewDiv = document.getElementById("preview");
+const progressBox = document.getElementById("progressBox");
+const progressBar = document.getElementById("progressBar");
+const progressText = document.getElementById("progressText");
 
-      try {
-        const res = await fetch("/download", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ youtubeUrl: url })
-        });
+let currentUrl = "";
 
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || "Unknown error");
-        }
+async function previewSong() {
+  const url = document.getElementById("youtubeUrl").value.trim();
+  currentUrl = url;
 
-        // Download the file
-        const blob = await res.blob();
-        const disposition = res.headers.get("Content-Disposition");
-        let filename = "song.mp3";
-        if (disposition && disposition.includes("filename=")) {
-          filename = disposition.split("filename=")[1].replace(/"/g, "");
-        }
+  const res = await fetch("/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ youtubeUrl: url })
+  });
 
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+  const data = await res.json();
+  if (!res.ok) return alert(data.error);
 
-        statusDiv.textContent = "Download complete!";
-      } catch (err) {
-        console.error(err);
-        statusDiv.textContent = "Error: " + err.message;
-      } finally {
-        downloadBtn.disabled = false;
-      }
-    });
-  </script>
+  document.getElementById("cover").src = data.cover;
+  document.getElementById("title").textContent = data.title;
+  document.getElementById("artist").textContent = data.artist;
+
+  previewDiv.style.display = "block";
+}
+
+document.getElementById("confirm").onclick = async () => {
+  previewDiv.style.display = "none";
+  progressBox.style.display = "block";
+
+  // Listen for progress
+  const evtSource = new EventSource("/progress");
+  evtSource.onmessage = e => {
+    const { percent, message } = JSON.parse(e.data);
+    progressBar.value = percent;
+    progressText.textContent = message + " (" + percent + "%)";
+  };
+
+  // Start download
+  const res = await fetch("/download", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ youtubeUrl: currentUrl })
+  });
+
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "song.mp3";
+  a.click();
+
+  evtSource.close();
+};
+</script>
+
 </body>
 </html>

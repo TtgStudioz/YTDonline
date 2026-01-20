@@ -6,6 +6,7 @@ const os = require("os");
 const { execFile, execSync } = require("child_process");
 const SpotifyWebApi = require("spotify-web-api-node");
 const fetch = require("node-fetch"); // npm install node-fetch@2
+let progressClients = [];
 
 const app = express();
 app.use(express.json());
@@ -109,6 +110,51 @@ async function fetchYoutubeMetadata(youtubeUrl) {
     });
   });
 }
+app.get("/progress", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
+  progressClients.push(res);
+
+  req.on("close", () => {
+    progressClients = progressClients.filter(c => c !== res);
+  });
+});
+function sendProgress(percent, message) {
+  progressClients.forEach(res => {
+    res.write(`data: ${JSON.stringify({ percent, message })}\n\n`);
+  });
+}
+
+// ---------------- PREVIEW ROUTE ----------------
+app.post("/preview", async (req, res) => {
+  const { youtubeUrl } = req.body;
+  if (!youtubeUrl) return res.status(400).json({ error: "Missing YouTube URL" });
+
+  try {
+    await getSpotifyToken();
+
+    // Get YouTube title + uploader
+    const searchQuery = await fetchYoutubeMetadata(youtubeUrl);
+
+    // Spotify search
+    const search = await spotify.searchTracks(searchQuery, { limit: 1 });
+    const track = search.body.tracks.items[0];
+    if (!track) throw new Error("Track not found on Spotify");
+
+    res.json({
+      title: track.name,
+      artist: track.artists.map(a => a.name).join(", "),
+      album: track.album.name,
+      cover: track.album.images[0].url
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 // ---------------- DOWNLOAD ROUTE ----------------
 app.post("/download", async (req, res) => {
@@ -145,24 +191,36 @@ app.post("/download", async (req, res) => {
     const buffer = await response.buffer();
     fs.writeFileSync(coverPath, buffer);
 
-    // 4️⃣ Download YouTube audio
-    console.log("Downloading YouTube audio...");
-    await new Promise((resolve, reject) => {
-      const args = [
-        "-x", "--audio-format", "mp3",
-        "--ffmpeg-location", ffmpegPath,
-        "--js-runtime", "node",
-        "-o", tempAudio,
-        youtubeUrl
-      ];
+  // 4️⃣ Download YouTube audio WITH PROGRESS
+  await new Promise((resolve, reject) => {
+    const args = [
+      "-x", "--audio-format", "mp3",
+      "--newline",
+      "--ffmpeg-location", ffmpegPath,
+      "-o", tempAudio,
+      youtubeUrl
+    ];
 
-      if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
+    if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
 
-      execFile(ytDlpPath, args, (err, stdout, stderr) => {
-        if (err) return reject(stderr || err);
-        resolve();
-      });
+    const proc = execFile(ytDlpPath, args);
+
+    proc.stdout.on("data", data => {
+      const line = data.toString();
+
+      const match = line.match(/(\d+\.\d+)%/);
+      if (match) {
+        sendProgress(parseFloat(match[1]), "Downloading audio");
+      }
     });
+
+    proc.on("close", code => {
+      if (code !== 0) return reject("yt-dlp failed");
+      sendProgress(100, "Download complete");
+      resolve();
+    });
+  });
+
 
     // 5️⃣ Embed metadata
     console.log("Embedding metadata...");
