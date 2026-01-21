@@ -5,14 +5,14 @@ const fs = require("fs");
 const os = require("os");
 const { execFile, execSync } = require("child_process");
 const SpotifyWebApi = require("spotify-web-api-node");
-const fetch = require("node-fetch"); // npm install node-fetch@2
-let progressClients = [];
+const fetch = require("node-fetch");
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(express.static("public"));
 
-// ---------------- SPOTIFY ----------------
+/* ================= SPOTIFY ================= */
 const spotify = new SpotifyWebApi({
   clientId: process.env.SPOTIFY_CLIENT_ID,
   clientSecret: process.env.SPOTIFY_CLIENT_SECRET
@@ -23,240 +23,149 @@ async function getSpotifyToken() {
   spotify.setAccessToken(data.body.access_token);
 }
 
-// ---------------- TEMP DIR ----------------
+/* ================= PATHS ================= */
 const tmpDir = os.tmpdir();
 const ytDlpPath = path.join(tmpDir, "yt-dlp");
 const ffmpegPath = path.join(tmpDir, "ffmpeg");
-
-// ---------------- COOKIES ----------------
 const cookiesPath = path.join(tmpDir, "cookies.txt");
 
-async function fetchCookies() {
-  if (!process.env.COOKIES_URL) throw new Error("COOKIES_URL not set");
-  if (!process.env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN not set");
+/* ================= PROGRESS (SSE) ================= */
+let clients = [];
 
-  try {
-    const res = await fetch(process.env.COOKIES_URL, {
-      headers: { 'Authorization': `token ${process.env.GITHUB_TOKEN}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const txt = await res.text();
-    fs.writeFileSync(cookiesPath, txt);
-    console.log("Cookies updated");
-  } catch (e) {
-    console.error("Failed to fetch cookies:", e);
-  }
+app.get("/progress", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  clients.push(res);
+
+  req.on("close", () => {
+    clients = clients.filter(c => c !== res);
+  });
+});
+
+function sendProgress(percent, message) {
+  clients.forEach(res =>
+    res.write(`data: ${JSON.stringify({ percent, message })}\n\n`)
+  );
+}
+
+/* ================= COOKIES ================= */
+async function fetchCookies() {
+  if (!process.env.COOKIES_URL || !process.env.GITHUB_TOKEN) return;
+
+  const res = await fetch(process.env.COOKIES_URL, {
+    headers: { Authorization: `token ${process.env.GITHUB_TOKEN}` }
+  });
+
+  const txt = await res.text();
+  fs.writeFileSync(cookiesPath, txt);
+  console.log("Cookies updated");
 }
 
 fetchCookies();
 setInterval(fetchCookies, 12 * 60 * 60 * 1000);
 
-// ---------------- SETUP BINARIES ----------------
+/* ================= BINARIES ================= */
 async function setupBinaries() {
-  // yt-dlp
   if (!fs.existsSync(ytDlpPath)) {
-    console.log("Downloading yt-dlp...");
-    const res = await fetch("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp");
-    const buffer = await res.buffer();
-    fs.writeFileSync(ytDlpPath, buffer);
+    const r = await fetch("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp");
+    fs.writeFileSync(ytDlpPath, await r.buffer());
     fs.chmodSync(ytDlpPath, 0o755);
   }
 
-  // FFmpeg static Linux
   if (!fs.existsSync(ffmpegPath)) {
-    console.log("Downloading FFmpeg...");
-    const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
-    const res = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
-    const buffer = await res.buffer();
-    fs.writeFileSync(ffmpegTar, buffer);
-
-    execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
-    const folders = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
-    if (folders.length === 0) throw new Error("FFmpeg folder not found after extraction");
-    const ffmpegFolder = path.join(tmpDir, folders[0]);
-
-    fs.renameSync(path.join(ffmpegFolder, "ffmpeg"), ffmpegPath);
+    const tar = path.join(tmpDir, "ffmpeg.tar.xz");
+    const r = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
+    fs.writeFileSync(tar, await r.buffer());
+    execSync(`tar -xJf ${tar} -C ${tmpDir}`);
+    const dir = fs.readdirSync(tmpDir).find(d => d.startsWith("ffmpeg-"));
+    fs.renameSync(path.join(tmpDir, dir, "ffmpeg"), ffmpegPath);
     fs.chmodSync(ffmpegPath, 0o755);
-
-    fs.rmSync(ffmpegFolder, { recursive: true, force: true });
-    fs.unlinkSync(ffmpegTar);
   }
 }
 
 setupBinaries().then(() => console.log("Binaries ready"));
 
-// ---------------- FETCH YOUTUBE METADATA ----------------
-async function fetchYoutubeMetadata(youtubeUrl) {
+/* ================= YOUTUBE META ================= */
+function getYoutubeQuery(url) {
   return new Promise((resolve, reject) => {
-    const args = [
-      "--no-warnings",
-      "--no-playlist",
-      "--dump-json",
-      youtubeUrl
-    ];
-
+    const args = ["--dump-json", "--no-playlist", url];
     if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
 
-    execFile(ytDlpPath, args, (err, stdout, stderr) => {
-      if (err) return reject(stderr || err);
-      try {
-        const info = JSON.parse(stdout);
-        // title + channel name
-        const query = `${info.title} ${info.uploader}`;
-        resolve(query);
-      } catch (e) {
-        reject(e);
-      }
+    execFile(ytDlpPath, args, (err, out) => {
+      if (err) return reject(err);
+      const info = JSON.parse(out);
+      resolve(`${info.title} ${info.uploader}`);
     });
   });
 }
-app.get("/progress", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
 
-  progressClients.push(res);
-
-  req.on("close", () => {
-    progressClients = progressClients.filter(c => c !== res);
-  });
-});
-function sendProgress(percent, message) {
-  progressClients.forEach(res => {
-    res.write(`data: ${JSON.stringify({ percent, message })}\n\n`);
-  });
-}
-
-// ---------------- PREVIEW ROUTE ----------------
+/* ================= PREVIEW ================= */
 app.post("/preview", async (req, res) => {
-  const { youtubeUrl } = req.body;
-  if (!youtubeUrl) return res.status(400).json({ error: "Missing YouTube URL" });
-
   try {
     await getSpotifyToken();
-
-    // Get YouTube title + uploader
-    const searchQuery = await fetchYoutubeMetadata(youtubeUrl);
-
-    // Spotify search
-    const search = await spotify.searchTracks(searchQuery, { limit: 1 });
-    const track = search.body.tracks.items[0];
-    if (!track) throw new Error("Track not found on Spotify");
+    const query = await getYoutubeQuery(req.body.youtubeUrl);
+    const s = await spotify.searchTracks(query, { limit: 1 });
+    const t = s.body.tracks.items[0];
 
     res.json({
-      title: track.name,
-      artist: track.artists.map(a => a.name).join(", "),
-      album: track.album.name,
-      cover: track.album.images[0].url
+      title: t.name,
+      artist: t.artists.map(a => a.name).join(", "),
+      album: t.album.name,
+      cover: t.album.images[0].url
     });
   } catch (e) {
-    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-
-// ---------------- DOWNLOAD ROUTE ----------------
+/* ================= DOWNLOAD ================= */
 app.post("/download", async (req, res) => {
-  const { youtubeUrl } = req.body;
-  if (!youtubeUrl) return res.status(400).json({ error: "Missing YouTube URL" });
-
   try {
     await getSpotifyToken();
+    const query = await getYoutubeQuery(req.body.youtubeUrl);
+    const s = await spotify.searchTracks(query, { limit: 1 });
+    const t = s.body.tracks.items[0];
 
-    // 1️⃣ Fetch YouTube metadata
-    const searchQuery = await fetchYoutubeMetadata(youtubeUrl);
+    const dir = path.join(tmpDir, "dl");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
-    // 2️⃣ Search Spotify using title + uploader
-    const search = await spotify.searchTracks(searchQuery, { limit: 1 });
-    const track = search.body.tracks.items[0];
-    if (!track) throw new Error("Track not found on Spotify");
+    const temp = path.join(dir, "temp.mp3");
+    const cover = path.join(dir, "cover.jpg");
+    const out = path.join(dir, `${t.name.replace(/[^a-z0-9 ]/gi, "")}.mp3`);
 
-    const title = track.name;
-    const artist = track.artists.map(a => a.name).join(", ");
-    const album = track.album.name;
-    const coverUrl = track.album.images[0].url;
+    const img = await fetch(t.album.images[0].url);
+    fs.writeFileSync(cover, await img.buffer());
 
-    const safeTitle = title.replace(/[^a-zA-Z0-9 ]/g, "");
-    const downloadsDir = path.join(tmpDir, "downloads");
-    if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir);
-
-    const tempAudio = path.join(downloadsDir, "temp.mp3");
-    const coverPath = path.join(downloadsDir, "cover.jpg");
-    const finalOutput = path.join(downloadsDir, `${safeTitle}.mp3`);
-
-    // 3️⃣ Download cover
-    console.log("Downloading cover image...");
-    const response = await fetch(coverUrl);
-    const buffer = await response.buffer();
-    fs.writeFileSync(coverPath, buffer);
-
-  // 4️⃣ Download YouTube audio WITH PROGRESS
-  await new Promise((resolve, reject) => {
-    const args = [
-      "-x", "--audio-format", "mp3",
-      "--newline",
-      "--ffmpeg-location", ffmpegPath,
-      "-o", tempAudio,
-      youtubeUrl
-    ];
-
-    if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
-
-    const proc = execFile(ytDlpPath, args);
-
-    proc.stdout.on("data", data => {
-      const line = data.toString();
-
-      const match = line.match(/(\d+\.\d+)%/);
-      if (match) {
-        sendProgress(parseFloat(match[1]), "Downloading audio");
-      }
-    });
-
-    proc.on("close", code => {
-      if (code !== 0) return reject("yt-dlp failed");
-      sendProgress(100, "Download complete");
-      resolve();
-    });
-  });
-
-
-    // 5️⃣ Embed metadata
-    console.log("Embedding metadata...");
     await new Promise((resolve, reject) => {
-      execFile(ffmpegPath, [
-        "-y",
-        "-i", tempAudio,
-        "-i", coverPath,
-        "-map", "0:0",
-        "-map", "1:0",
-        "-c", "copy",
-        "-id3v2_version", "3",
-        "-metadata", `title=${title}`,
-        "-metadata", `artist=${artist}`,
-        "-metadata", `album=${album}`,
-        finalOutput
-      ], (err, stdout, stderr) => {
-        if (err) return reject(stderr || err);
-        resolve();
+      const args = [
+        "-x", "--audio-format", "mp3",
+        "--newline",
+        "--ffmpeg-location", ffmpegPath,
+        "-o", temp,
+        req.body.youtubeUrl
+      ];
+      if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
+
+      const p = execFile(ytDlpPath, args);
+      p.stdout.on("data", d => {
+        const m = d.toString().match(/(\d+\.\d+)%/);
+        if (m) sendProgress(parseFloat(m[1]), "Downloading");
       });
+      p.on("close", c => c === 0 ? resolve() : reject());
     });
 
-    // Cleanup
-    fs.unlinkSync(tempAudio);
-    fs.unlinkSync(coverPath);
+    execSync(
+      `${ffmpegPath} -y -i "${temp}" -i "${cover}" -map 0 -map 1 -c copy ` +
+      `-metadata title="${t.name}" -metadata artist="${t.artists[0].name}" ` +
+      `-metadata album="${t.album.name}" "${out}"`
+    );
 
-    console.log("Sending file to browser...");
-    res.download(finalOutput);
-
+    sendProgress(100, "Finished");
+    res.download(out);
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    res.status(500).send(e.message);
   }
 });
 
-// ---------------- START SERVER ----------------
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running...");
-});
+app.listen(process.env.PORT || 3000, () => console.log("Server running"));

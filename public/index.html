@@ -1,130 +1,70 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>YouTube to MP3 Downloader</title>
+  <title>YouTube → MP3</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      background: #f0f0f0;
-    }
-    .container {
-      background: #fff;
-      padding: 30px;
-      border-radius: 10px;
-      box-shadow: 0 0 15px rgba(0,0,0,0.2);
-      text-align: center;
-      width: 90%;
-      max-width: 400px;
-    }
-    input {
-      width: 100%;
-      padding: 10px;
-      font-size: 16px;
-      margin: 10px 0;
-      border-radius: 5px;
-      border: 1px solid #ccc;
-    }
-    button {
-      padding: 10px 20px;
-      font-size: 16px;
-      border: none;
-      background-color: #1db954;
-      color: #fff;
-      border-radius: 5px;
-      cursor: pointer;
-    }
-    button:disabled {
-      background-color: #999;
-      cursor: not-allowed;
-    }
-    #status {
-      margin-top: 15px;
-      font-size: 14px;
-      color: #333;
-    }
+    body { font-family: Arial; background:#eee; display:flex; justify-content:center; }
+    .box { background:#fff; padding:20px; margin-top:50px; width:300px; text-align:center; border-radius:8px; }
+    img { width:200px; border-radius:6px }
+    progress { width:100%; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h2>YouTube to MP3 Downloader</h2>
-    <input type="text" id="youtubeUrl" placeholder="Paste YouTube video URL here">
-    <button id="downloadBtn">Download</button>
-    <div id="status"></div>
-  </div>
+
+<div class="box">
+  <input id="url" placeholder="YouTube URL" style="width:100%"><br><br>
+  <button id="downloadBtn">Download</button>
+
   <div id="preview" style="display:none">
-  <img id="cover" width="200"><br>
-  <strong id="title"></strong><br>
-  <span id="artist"></span><br><br>
-  <button id="confirm">Confirm Download</button>
+    <img id="cover"><br>
+    <b id="title"></b><br>
+    <span id="artist"></span><br><br>
+    <button id="confirm">Confirm</button>
+  </div>
+
+  <div id="progressBox" style="display:none">
+    <progress id="bar" max="100"></progress>
+    <div id="text"></div>
+  </div>
 </div>
 
-<div id="progressBox" style="display:none">
-  <progress id="progressBar" value="0" max="100"></progress>
-  <div id="progressText"></div>
-</div>
-
-
- <script>
-const previewDiv = document.getElementById("preview");
-const progressBox = document.getElementById("progressBox");
-const progressBar = document.getElementById("progressBar");
-const progressText = document.getElementById("progressText");
-
+<script>
 let currentUrl = "";
 
-async function previewSong() {
-  const url = document.getElementById("youtubeUrl").value.trim();
-  currentUrl = url;
-
-  const res = await fetch("/preview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ youtubeUrl: url })
+document.getElementById("downloadBtn").onclick = async () => {
+  currentUrl = document.getElementById("url").value;
+  const r = await fetch("/preview", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body:JSON.stringify({ youtubeUrl: currentUrl })
   });
+  const d = await r.json();
+  document.getElementById("cover").src = d.cover;
+  document.getElementById("title").textContent = d.title;
+  document.getElementById("artist").textContent = d.artist;
+  document.getElementById("preview").style.display = "block";
+};
 
-  const data = await res.json();
-  if (!res.ok) return alert(data.error);
+document.getElementById("confirm").onclick = () => {
+  document.getElementById("preview").style.display = "none";
+  document.getElementById("progressBox").style.display = "block";
 
-  document.getElementById("cover").src = data.cover;
-  document.getElementById("title").textContent = data.title;
-  document.getElementById("artist").textContent = data.artist;
-
-  previewDiv.style.display = "block";
-}
-
-document.getElementById("confirm").onclick = async () => {
-  previewDiv.style.display = "none";
-  progressBox.style.display = "block";
-
-  // Listen for progress
-  const evtSource = new EventSource("/progress");
-  evtSource.onmessage = e => {
-    const { percent, message } = JSON.parse(e.data);
-    progressBar.value = percent;
-    progressText.textContent = message + " (" + percent + "%)";
+  const es = new EventSource("/progress");
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    document.getElementById("bar").value = d.percent;
+    document.getElementById("text").textContent = d.message;
   };
 
-  // Start download
-  const res = await fetch("/download", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ youtubeUrl: currentUrl })
-  });
-
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "song.mp3";
-  a.click();
-
-  evtSource.close();
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = "/download";
+  const i = document.createElement("input");
+  i.name = "youtubeUrl";
+  i.value = currentUrl;
+  form.appendChild(i);
+  document.body.appendChild(form);
+  form.submit();
 };
 </script>
 
