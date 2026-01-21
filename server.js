@@ -31,13 +31,14 @@ const ffmpegPath = path.join(tmpDir, "ffmpeg");
 const cookiesPath = path.join(tmpDir, "cookies.txt");
 
 async function fetchCookies() {
-  if (!process.env.COOKIES_URL) return;
-  if (!process.env.GITHUB_TOKEN) return;
+  if (!process.env.COOKIES_URL) throw new Error("COOKIES_URL not set");
+  if (!process.env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN not set");
 
   try {
     const res = await fetch(process.env.COOKIES_URL, {
-      headers: { Authorization: `token ${process.env.GITHUB_TOKEN}` }
+      headers: { 'Authorization': `token ${process.env.GITHUB_TOKEN}` }
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const txt = await res.text();
     fs.writeFileSync(cookiesPath, txt);
     console.log("Cookies updated");
@@ -51,68 +52,79 @@ setInterval(fetchCookies, 12 * 60 * 60 * 1000);
 
 // ---------------- SETUP BINARIES ----------------
 async function setupBinaries() {
+  // yt-dlp
   if (!fs.existsSync(ytDlpPath)) {
     console.log("Downloading yt-dlp...");
     const res = await fetch("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp");
-    fs.writeFileSync(ytDlpPath, await res.buffer());
+    const buffer = await res.buffer();
+    fs.writeFileSync(ytDlpPath, buffer);
     fs.chmodSync(ytDlpPath, 0o755);
   }
 
+  // FFmpeg static Linux
   if (!fs.existsSync(ffmpegPath)) {
     console.log("Downloading FFmpeg...");
-    const tarPath = path.join(tmpDir, "ffmpeg.tar.xz");
+    const ffmpegTar = path.join(tmpDir, "ffmpeg.tar.xz");
     const res = await fetch("https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz");
-    fs.writeFileSync(tarPath, await res.buffer());
+    const buffer = await res.buffer();
+    fs.writeFileSync(ffmpegTar, buffer);
 
-    execSync(`tar -xJf ${tarPath} -C ${tmpDir}`);
-    const folder = fs.readdirSync(tmpDir).find(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
-    fs.renameSync(path.join(tmpDir, folder, "ffmpeg"), ffmpegPath);
+    execSync(`tar -xJf ${ffmpegTar} -C ${tmpDir}`);
+    const folders = fs.readdirSync(tmpDir).filter(f => f.startsWith("ffmpeg-") && f.endsWith("-static"));
+    if (folders.length === 0) throw new Error("FFmpeg folder not found after extraction");
+    const ffmpegFolder = path.join(tmpDir, folders[0]);
+
+    fs.renameSync(path.join(ffmpegFolder, "ffmpeg"), ffmpegPath);
     fs.chmodSync(ffmpegPath, 0o755);
 
-    fs.rmSync(path.join(tmpDir, folder), { recursive: true, force: true });
-    fs.unlinkSync(tarPath);
+    fs.rmSync(ffmpegFolder, { recursive: true, force: true });
+    fs.unlinkSync(ffmpegTar);
   }
 }
 
-setupBinaries();
+setupBinaries().then(() => console.log("Binaries ready"));
 
-// ---------------- YOUTUBE METADATA ----------------
-async function fetchYoutubeMetadata(url) {
+// ---------------- FETCH YOUTUBE METADATA ----------------
+async function fetchYoutubeMetadata(youtubeUrl) {
   return new Promise((resolve, reject) => {
-    const args = ["--dump-json", "--no-playlist", url];
+    const args = [
+      "--no-warnings",
+      "--no-playlist",
+      "--dump-json",
+      youtubeUrl
+    ];
+
     if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
 
-    execFile(ytDlpPath, args, (err, stdout) => {
-      if (err) return reject(err);
-      const info = JSON.parse(stdout);
-      resolve(`${info.title} ${info.uploader}`);
+    execFile(ytDlpPath, args, (err, stdout, stderr) => {
+      if (err) return reject(stderr || err);
+      try {
+        const info = JSON.parse(stdout);
+        // title + channel name
+        const query = `${info.title} ${info.uploader}`;
+        resolve(query);
+      } catch (e) {
+        reject(e);
+      }
     });
   });
 }
 
-// ---------------- PROGRESS STREAM ----------------
-app.get("/download-progress", async (req, res) => {
-  const youtubeUrl = req.query.url;
-  if (!youtubeUrl) return res.end();
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  const send = (data) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
+// ---------------- DOWNLOAD ROUTE ----------------
+app.post("/download", async (req, res) => {
+  const { youtubeUrl } = req.body;
+  if (!youtubeUrl) return res.status(400).json({ error: "Missing YouTube URL" });
 
   try {
     await getSpotifyToken();
-    send({ status: "Fetching metadata..." });
 
+    // 1️⃣ Fetch YouTube metadata
     const searchQuery = await fetchYoutubeMetadata(youtubeUrl);
-    send({ status: "Searching Spotify..." });
 
+    // 2️⃣ Search Spotify using title + uploader
     const search = await spotify.searchTracks(searchQuery, { limit: 1 });
     const track = search.body.tracks.items[0];
-    if (!track) throw new Error("Track not found");
+    if (!track) throw new Error("Track not found on Spotify");
 
     const title = track.name;
     const artist = track.artists.map(a => a.name).join(", ");
@@ -125,75 +137,68 @@ app.get("/download-progress", async (req, res) => {
 
     const tempAudio = path.join(downloadsDir, "temp.mp3");
     const coverPath = path.join(downloadsDir, "cover.jpg");
-    const finalFile = `${safeTitle}.mp3`;
-    const finalPath = path.join(downloadsDir, finalFile);
+    const finalOutput = path.join(downloadsDir, `${safeTitle}.mp3`);
 
-    send({ status: "Downloading cover..." });
-    const coverRes = await fetch(coverUrl);
-    fs.writeFileSync(coverPath, await coverRes.buffer());
+    // 3️⃣ Download cover
+    console.log("Downloading cover image...");
+    const response = await fetch(coverUrl);
+    const buffer = await response.buffer();
+    fs.writeFileSync(coverPath, buffer);
 
-    send({ status: "Downloading audio...", progress: "0%" });
+    // 4️⃣ Download YouTube audio
+    console.log("Downloading YouTube audio...");
+    await new Promise((resolve, reject) => {
+      const args = [
+        "-x", "--audio-format", "mp3",
+        "--ffmpeg-location", ffmpegPath,
+        "--js-runtime", "node",
+        "-o", tempAudio,
+        youtubeUrl
+      ];
 
-    const args = [
-      "-x",
-      "--audio-format", "mp3",
-      "--newline",
-      "--progress-template", "%(progress._percent_str)s",
-      "--ffmpeg-location", ffmpegPath,
-      "-o", tempAudio,
-      youtubeUrl
-    ];
+      if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
 
-    if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
-
-    const yt = execFile(ytDlpPath, args);
-
-    yt.stdout.on("data", (data) => {
-      const text = data.toString().trim();
-      if (text.includes("%")) {
-        send({ progress: text });
-      }
-    });
-
-    yt.on("close", async () => {
-      send({ status: "Embedding metadata..." });
-
-      await new Promise((resolve, reject) => {
-        execFile(ffmpegPath, [
-          "-y",
-          "-i", tempAudio,
-          "-i", coverPath,
-          "-map", "0:0",
-          "-map", "1:0",
-          "-c", "copy",
-          "-id3v2_version", "3",
-          "-metadata", `title=${title}`,
-          "-metadata", `artist=${artist}`,
-          "-metadata", `album=${album}`,
-          finalPath
-        ], err => err ? reject(err) : resolve());
+      execFile(ytDlpPath, args, (err, stdout, stderr) => {
+        if (err) return reject(stderr || err);
+        resolve();
       });
-
-      fs.unlinkSync(tempAudio);
-      fs.unlinkSync(coverPath);
-
-      send({ done: true, filename: finalFile });
-      res.end();
     });
+
+    // 5️⃣ Embed metadata
+    console.log("Embedding metadata...");
+    await new Promise((resolve, reject) => {
+      execFile(ffmpegPath, [
+        "-y",
+        "-i", tempAudio,
+        "-i", coverPath,
+        "-map", "0:0",
+        "-map", "1:0",
+        "-c", "copy",
+        "-id3v2_version", "3",
+        "-metadata", `title=${title}`,
+        "-metadata", `artist=${artist}`,
+        "-metadata", `album=${album}`,
+        finalOutput
+      ], (err, stdout, stderr) => {
+        if (err) return reject(stderr || err);
+        resolve();
+      });
+    });
+
+    // Cleanup
+    fs.unlinkSync(tempAudio);
+    fs.unlinkSync(coverPath);
+
+    console.log("Sending file to browser...");
+    res.download(finalOutput);
 
   } catch (e) {
-    send({ error: e.message });
-    res.end();
+    console.error(e);
+    res.status(500).json({ error: e.message });
   }
-});
-
-// ---------------- FILE DOWNLOAD ----------------
-app.get("/download-file", (req, res) => {
-  const filePath = path.join(os.tmpdir(), "downloads", req.query.file);
-  res.download(filePath);
 });
 
 // ---------------- START SERVER ----------------
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running on port 3000");
+  console.log("Server running...");
 });
